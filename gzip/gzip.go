@@ -28,7 +28,7 @@ const (
 type status int
 
 const (
-	COMPRESSION_UNDEFINED status = iota
+	COMPRESSION_CHECK status = iota
 	COMPRESSION_DISABLED
 	COMPRESSION_ENABLED
 )
@@ -49,29 +49,38 @@ type Compression interface {
 	AllowCompression(w http.ResponseWriter, r *http.Request) bool
 }
 
-func (grw *gzipResponseWriter) compressContent() bool {
-	if grw.status == COMPRESSION_UNDEFINED {
+func (grw *gzipResponseWriter) WriteHeader(code int) {
+	if grw.status == COMPRESSION_CHECK {
 		if grw.allowCompression == nil || grw.allowCompression(grw, grw.r) {
 			grw.status = COMPRESSION_ENABLED
-			// Set the appropriate gzip headers.
 			headers := grw.Header()
+			// Delete any existing content length header.
+			// see http://stackoverflow.com/questions/3819280/content-length-when-using-http-compression
+			headers.Del(headerContentLength)
+			// Set the appropriate gzip headers.
 			headers.Set(headerContentEncoding, encodingGzip)
 			headers.Set(headerVary, headerAcceptEncoding)
 		} else {
 			grw.status = COMPRESSION_DISABLED
 		}
 	}
-	return grw.status == COMPRESSION_ENABLED
+	grw.ResponseWriter.WriteHeader(code)
 }
 
 // Write writes bytes to the gzip.Writer. It will also set the Content-Type
 // header using the net/http library content type detection if the Content-Type
 // header was not set yet.
 func (grw *gzipResponseWriter) Write(b []byte) (int, error) {
-	if len(grw.Header().Get(headerContentType)) == 0 {
-		grw.Header().Set(headerContentType, http.DetectContentType(b))
+	if grw.status == COMPRESSION_CHECK {
+		if len(grw.Header().Get(headerContentType)) == 0 {
+			// Ensure Content-Type detection runs on uncompressed data.
+			// Otherwise Content-Type is set it to application/x-gzip.
+			grw.Header().Set(headerContentType, http.DetectContentType(b))
+		}
+		grw.WriteHeader(http.StatusOK)
 	}
-	if grw.compressContent() {
+
+	if grw.status == COMPRESSION_ENABLED {
 		return grw.w.Write(b)
 	} else {
 		return grw.ResponseWriter.Write(b)
@@ -91,7 +100,7 @@ func Default() *handler {
 
 // Gzip returns a handler which will handle the Gzip compression in ServeHTTP.
 // Valid values for level are identical to those in the compress/gzip package.
-// 
+//
 // An optional callback can be registered to enable/disable compression.
 // The handler runs the the first time data is written to the http.ResponseWriter.
 // At this time all response headers have been set.
@@ -140,7 +149,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next http.Ha
 		w:                gz,
 		ResponseWriter:   nrw,
 		allowCompression: h.allowCompression,
-		status:           COMPRESSION_UNDEFINED,
+		status:           COMPRESSION_CHECK,
 	}
 
 	defer func() {
@@ -148,9 +157,6 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next http.Ha
 			// Calling .Close() does write the GZIP header.
 			// This should only happend when compression is enabled.
 			gz.Close()
-
-			// Delete the content length after we know we have been written to.
-			grw.Header().Del(headerContentLength)
 		}
 	}()
 
